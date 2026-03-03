@@ -12,6 +12,16 @@ local HEALER_CLASSES = {
   SHAMAN = true,
 }
 
+local MANA_CLASSES = {
+  DRUID = true,
+  HUNTER = true,
+  MAGE = true,
+  PALADIN = true,
+  PRIEST = true,
+  SHAMAN = true,
+  WARLOCK = true,
+}
+
 local DEFAULTS = {
   visible = true,
   locked = false,
@@ -34,10 +44,10 @@ local DEFAULTS = {
 }
 
 local LATEST_CHANGELOG = {
-  "v0.2.1",
-  "- Fixed group unit detection to include full party/raid reliably.",
-  "- Unit scanning now uses party1-4 and raid1-40 with UnitExists checks.",
-  "- Resolves cases where only player was shown while grouped.",
+  "v0.2.2",
+  "- Fixed rogue/warrior appearing in mana list by class-based mana filter.",
+  "- Mana view now requires a mana-capable class plus max mana > 0.",
+  "- Applied same filter to role override popup entries.",
 }
 
 local db
@@ -169,6 +179,10 @@ end
 
 local function IsHealerClass(classFile)
   return HEALER_CLASSES[classFile] == true
+end
+
+local function IsManaClass(classFile)
+  return MANA_CLASSES[classFile] == true
 end
 
 local function NormalizeName(name)
@@ -321,7 +335,7 @@ local function BuildEntries()
         local name = UnitName(unit) or unit
         if db.view ~= "healers" or IsHealerUnit(unit, classFile, name) then
           local maxMana = UnitPowerMax(unit, 0) or 0
-          if maxMana > 0 then
+          if IsManaClass(classFile) and maxMana > 0 then
             local currentMana = connected and (UnitPower(unit, 0) or 0) or 0
             local pct = (currentMana / maxMana) * 100
             local role = UnitGroupRolesAssigned and UnitGroupRolesAssigned(unit) or "NONE"
@@ -529,8 +543,9 @@ local function RefreshRoleOverrideUI()
   for i = 1, #units do
     local unit = units[i]
     if UnitExists(unit) then
+      local _, classFile = UnitClass(unit)
       local maxMana = UnitPowerMax(unit, 0) or 0
-      if maxMana > 0 then
+      if IsManaClass(classFile) and maxMana > 0 then
         local name = UnitName(unit)
         local key = NormalizeName(name)
         if key and not seen[key] then

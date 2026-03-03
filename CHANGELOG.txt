@@ -1,5 +1,9 @@
 RaidManaTBC Changelog
 
+v0.2.2
+- Fixed non-mana classes (like Rogue) appearing in mana list.
+- Added explicit mana-class filter + max mana check in entry building.
+- Applied the same mana-class filter in role override popup list.
 v0.2.1
 - Fixed group detection to reliably include party and raid members.
 - Now scans party1-4 and raid1-40 via UnitExists instead of count APIs.
@@ -85,6 +89,7 @@ v0.1.0
   /raidmana sort low | high
   /raidmana offline on | off
   /raidmana changelog
+
 
 
 
