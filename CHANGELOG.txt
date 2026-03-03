@@ -1,5 +1,8 @@
 RaidManaTBC Changelog
 
+v1.0.1
+- Test automated release pipeline update.
+
 v0.2.2
 - Fixed non-mana classes (like Rogue) appearing in mana list.
 - Added explicit mana-class filter + max mana check in entry building.
