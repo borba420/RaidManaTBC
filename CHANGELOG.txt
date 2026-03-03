@@ -1,0 +1,93 @@
+RaidManaTBC Changelog
+
+v0.2.1
+- Fixed group detection to reliably include party and raid members.
+- Now scans party1-4 and raid1-40 via UnitExists instead of count APIs.
+- Fixes cases where only player appeared while grouped.
+v0.2.0
+- Added role override popup UI with clickable names (cycle AUTO/HEALER/TANK/DAMAGER).
+- Added auto group visibility (auto-hide solo, auto-show in party/raid).
+- Added readability presets (normal/readable) for line spacing.
+- Added triage markers: low mana (<20%) and recent mana drop indicator.
+v0.1.9
+- Switched role icons to Group Finder portrait role icons (tank/healer/dps).
+v0.1.8
+- Replaced the custom DPS ability icon with a standard role-style DPS icon.
+v0.1.7
+- Fixed role icons not showing by switching to reliable icon textures.
+- Added fallback role assignment when UnitGroupRolesAssigned is NONE.
+- Fallback: healer classes show healer icon, others show dps icon.
+- Manual set/remove overrides still take priority.
+v0.1.6
+- Simplified manual override commands to top-level slash commands.
+- Use: /raidmana set <name> healer|tank|dps
+- Use: /raidmana remove <name>
+- Use: /raidmana list
+- Use: /raidmana clear
+- Kept small role icons next to names in All view.
+v0.1.5
+- Added optional manual role override list via slash commands.
+- New commands:
+  - /raidmana override set <name> healer|tank|dps
+  - /raidmana override remove <name>
+  - /raidmana override list
+  - /raidmana override clear
+- Overrides affect healer filtering and All-view role icons.
+
+v0.1.4
+- Added small role icons on each line in All view (tank/healer/dps) for mana users.
+- Healers view remains healer-only and keeps the compact text layout.
+
+v0.1.3
+- Removed scale control from options UI and slash commands to keep layout consistent.
+- Healers view now uses group role data when available (`HEALER` only).
+- If role data is missing, healer filtering falls back to healer classes.
+
+v0.1.2
+- Added a standalone options window (`/raidmana options`) for all key settings.
+- Minimap right-click now opens the options window directly.
+- Keeps LibDBIcon drag behavior while still syncing minimapAngle/minimapPos.
+
+v0.1.1
+- Switched minimap button implementation to LibDataBroker-1.1 + LibDBIcon-1.0.
+- Kept left-click show/hide and right-click dropdown options.
+- Minimap button drag position now uses LibDBIcon handling.
+- Synced SavedVariables minimapAngle with LibDBIcon minimapPos.
+
+v0.1.0
+- Initial release for TBC Classic (2.5.x).
+- Added compact mana overview frame with:
+  - Header: "Average Mana (All|Healers): XX.X%"
+  - Unit lines: "Name: YY.Y%"
+- Class-colored names and threshold-colored mana values.
+- Two views:
+  - ALL (all mana users)
+  - HEALERS (PRIEST, DRUID, PALADIN, SHAMAN)
+- Average modes:
+  - weighted (sum current / sum max)
+  - mean (simple average of percentages)
+- Sorting:
+  - low (default)
+  - high
+- Reused preallocated font strings (1 header + up to 40 lines).
+- Throttled updates (0.2s) with dirty-flag rendering.
+- Added minimap button with drag-around-minimap support.
+- Added saved settings:
+  - visible, locked, scale, point/x/y
+  - view, mode, sort, showOffline, minimapAngle
+- Added slash commands:
+  /raidmana show | hide
+  /raidmana lock | unlock
+  /raidmana reset
+  /raidmana scale <number>
+  /raidmana view all | healers
+  /raidmana mode weighted | mean
+  /raidmana sort low | high
+  /raidmana offline on | off
+  /raidmana changelog
+
+
+
+
+
+
