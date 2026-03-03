@@ -1,5 +1,25 @@
 RaidManaTBC Changelog
 
+v1.0.6
+- Fixed AddGroupUnits nil runtime error in override-sync logic.
+
+v1.0.5
+- Override edits are now leader-only in party/raid.
+- Leader override changes sync to all addon users.
+- Added full override resync on roster updates and addon pings.
+
+v1.0.4
+- Added alert sender mode: Leader or Auto Single Sender.
+- Auto mode prefers leader (if they have addon), else picks one deterministic sender.
+- Added addon peer ping sync so only one user announces healer alerts.
+
+v1.0.3
+- Added options toggle for healer alert messages (Healer Alerts On/Off).
+- Leader-only healer mana announcements now respect that toggle.
+v1.0.2
+- Added leader-only healer mana alerts for thresholds below 50%, 25%, and 10%.
+- Alerts run regardless of selected view mode.
+
 v1.0.1
 - Test automated release pipeline update.
 
@@ -92,6 +112,7 @@ v0.1.0
   /raidmana sort low | high
   /raidmana offline on | off
   /raidmana changelog
+
 
 
 

@@ -4,6 +4,9 @@ local DB_NAME = "RaidManaTBCDB"
 local MAX_LINES = 40
 local UPDATE_INTERVAL = 0.2
 local ENABLE_BACKGROUND = true -- Set to false if you want no background panel.
+local COMM_PREFIX = "RMTBC1"
+local COMM_INTERVAL = 15
+local COMM_STALE = 60
 
 local HEALER_CLASSES = {
   PRIEST = true,
@@ -41,13 +44,14 @@ local DEFAULTS = {
   roleOverrides = {},
   autoGroupVisibility = true,
   readability = "normal", -- normal | readable
+  healerAlerts = true,
+  alertSenderMode = "leader", -- leader | auto
 }
 
 local LATEST_CHANGELOG = {
-  "v0.2.2",
-  "- Fixed rogue/warrior appearing in mana list by class-based mana filter.",
-  "- Mana view now requires a mana-capable class plus max mana > 0.",
-  "- Applied same filter to role override popup entries.",
+  "v1.0.6",
+  "- Fixed AddGroupUnits nil error caused by function-ordering in Lua.",
+  "- Kept leader-only override sync behavior from v1.0.5.",
 }
 
 local db
@@ -69,6 +73,9 @@ local ldbObject
 local libDBIcon
 local previousPctByName = {}
 local recentDropUntilByName = {}
+local healerAlertStageByName = {}
+local addonPeersByName = {}
+local commElapsed = 0
 
 local function Msg(text)
   DEFAULT_CHAT_FRAME:AddMessage("|cff33ff99RaidManaTBC|r: " .. text)
@@ -268,6 +275,176 @@ local function IsInGroupNow()
   return false
 end
 
+local function GetPlayerKey()
+  return NormalizeName(UnitName("player"))
+end
+
+local function GetGroupChannel()
+  if UnitInRaid and UnitInRaid("player") then
+    return "RAID"
+  end
+  if IsInGroupNow() then
+    return "PARTY"
+  end
+  return nil
+end
+
+local function SendAddonPing()
+  local channel = GetGroupChannel()
+  if not channel then
+    return
+  end
+  if C_ChatInfo and C_ChatInfo.SendAddonMessage then
+    C_ChatInfo.SendAddonMessage(COMM_PREFIX, "PING", channel)
+  elseif SendAddonMessage then
+    SendAddonMessage(COMM_PREFIX, "PING", channel)
+  end
+end
+
+local function RegisterAddonPrefix()
+  if C_ChatInfo and C_ChatInfo.RegisterAddonMessagePrefix then
+    C_ChatInfo.RegisterAddonMessagePrefix(COMM_PREFIX)
+  elseif RegisterAddonMessagePrefix then
+    RegisterAddonMessagePrefix(COMM_PREFIX)
+  end
+end
+
+local AddGroupUnits
+
+local function BuildGroupMemberKeySet()
+  local set = {}
+  AddGroupUnits()
+  for i = 1, #units do
+    local unit = units[i]
+    if UnitExists(unit) then
+      local name = UnitName(unit)
+      local key = NormalizeName(name)
+      if key then
+        set[key] = true
+      end
+    end
+  end
+  return set
+end
+
+local function GetGroupLeaderKey()
+  AddGroupUnits()
+  for i = 1, #units do
+    local unit = units[i]
+    if UnitExists(unit) and UnitIsGroupLeader and UnitIsGroupLeader(unit) then
+      return NormalizeName(UnitName(unit))
+    end
+  end
+  return nil
+end
+
+local function CanManageOverrides()
+  if not IsInGroupNow() then
+    return true
+  end
+  if UnitIsGroupLeader then
+    return UnitIsGroupLeader("player")
+  end
+  if IsRaidLeader and IsRaidLeader() then
+    return true
+  end
+  if IsPartyLeader and IsPartyLeader() then
+    return true
+  end
+  return false
+end
+
+local function PruneAddonPeers(groupSet, now)
+  for nameKey, lastSeen in pairs(addonPeersByName) do
+    if (not groupSet[nameKey]) or (now - lastSeen > COMM_STALE) then
+      addonPeersByName[nameKey] = nil
+    end
+  end
+end
+
+local function SendAddonMessageSafe(msg)
+  local channel = GetGroupChannel()
+  if not channel then
+    return
+  end
+  if C_ChatInfo and C_ChatInfo.SendAddonMessage then
+    C_ChatInfo.SendAddonMessage(COMM_PREFIX, msg, channel)
+  elseif SendAddonMessage then
+    SendAddonMessage(COMM_PREFIX, msg, channel)
+  end
+end
+
+local function SerializeOverrides()
+  if type(db.roleOverrides) ~= "table" then
+    db.roleOverrides = {}
+  end
+  local keys = {}
+  for key in pairs(db.roleOverrides) do
+    keys[#keys + 1] = key
+  end
+  table.sort(keys)
+
+  local parts = {}
+  for i = 1, #keys do
+    local k = keys[i]
+    local v = db.roleOverrides[k]
+    if IsValidRole(v) then
+      parts[#parts + 1] = k .. "=" .. v
+    end
+  end
+  return table.concat(parts, ";")
+end
+
+local function ApplySerializedOverrides(payload)
+  if type(db.roleOverrides) ~= "table" then
+    db.roleOverrides = {}
+  end
+  wipe(db.roleOverrides)
+
+  if payload and payload ~= "" then
+    for pair in string.gmatch(payload, "([^;]+)") do
+      local key, role = pair:match("^([^=]+)=([^=]+)$")
+      if key and IsValidRole(role) then
+        db.roleOverrides[key] = role
+      end
+    end
+  end
+
+  dirty = true
+end
+
+local function BroadcastOverrideFullSync()
+  if not IsInGroupNow() or not CanManageOverrides() then
+    return
+  end
+  SendAddonMessageSafe("OVR_FULL:" .. SerializeOverrides())
+end
+
+local function BroadcastOverrideSet(key, role)
+  if not IsInGroupNow() or not CanManageOverrides() then
+    return
+  end
+  if key and IsValidRole(role) then
+    SendAddonMessageSafe("OVR_SET:" .. key .. ":" .. role)
+  end
+end
+
+local function BroadcastOverrideDelete(key)
+  if not IsInGroupNow() or not CanManageOverrides() then
+    return
+  end
+  if key then
+    SendAddonMessageSafe("OVR_DEL:" .. key)
+  end
+end
+
+local function BroadcastOverrideClear()
+  if not IsInGroupNow() or not CanManageOverrides() then
+    return
+  end
+  SendAddonMessageSafe("OVR_CLR")
+end
+
 local function ApplyAutoGroupVisibility()
   if not db.autoGroupVisibility then
     return
@@ -293,7 +470,93 @@ local function GetTriagePrefix(entry)
   return ""
 end
 
-local function AddGroupUnits()
+local function IsPlayerGroupLeader()
+  if UnitIsGroupLeader then
+    return UnitIsGroupLeader("player")
+  end
+  if IsRaidLeader and IsRaidLeader() then
+    return true
+  end
+  if IsPartyLeader and IsPartyLeader() then
+    return true
+  end
+  return false
+end
+
+local function GetAlertChatChannel()
+  return GetGroupChannel()
+end
+
+local function IsAlertSender()
+  if db.alertSenderMode ~= "auto" then
+    return IsPlayerGroupLeader()
+  end
+
+  local playerKey = GetPlayerKey()
+  if not playerKey then
+    return false
+  end
+
+  local now = GetTime and GetTime() or 0
+  local groupSet = BuildGroupMemberKeySet()
+  PruneAddonPeers(groupSet, now)
+  addonPeersByName[playerKey] = now
+
+  local leaderKey = GetGroupLeaderKey()
+  if leaderKey and addonPeersByName[leaderKey] then
+    return playerKey == leaderKey
+  end
+
+  local chosen
+  for nameKey, _ in pairs(addonPeersByName) do
+    if groupSet[nameKey] then
+      if not chosen or nameKey < chosen then
+        chosen = nameKey
+      end
+    end
+  end
+
+  return chosen == playerKey
+end
+
+local function GetHealerAlertStage(pct)
+  if pct < 10 then
+    return 3
+  elseif pct < 25 then
+    return 2
+  elseif pct < 50 then
+    return 1
+  end
+  return 0
+end
+
+local function SendHealerManaAlert(name, pct, stage)
+  if not db.healerAlerts then
+    return
+  end
+
+  if not IsAlertSender() then
+    return
+  end
+
+  local channel = GetAlertChatChannel()
+  if not channel then
+    return
+  end
+
+  local msg
+  if stage == 3 then
+    msg = string.format("%s mana is CRITICAL (%.1f%%).", name, pct)
+  elseif stage == 2 then
+    msg = string.format("%s mana is very low (%.1f%%).", name, pct)
+  else
+    msg = string.format("%s mana is below 50%% (%.1f%%).", name, pct)
+  end
+
+  SendChatMessage(msg, channel)
+end
+
+AddGroupUnits = function()
   wipe(units)
 
   if UnitExists("raid1") then
@@ -346,6 +609,17 @@ local function BuildEntries()
             end
             if not IsValidRole(role) then
               role = GetFallbackRoleForClass(classFile)
+            end
+
+            if connected and IsHealerUnit(unit, classFile, name) then
+              local stage = GetHealerAlertStage(pct)
+              local oldStage = healerAlertStageByName[nameKey] or 0
+
+              if stage > oldStage then
+                SendHealerManaAlert(name, pct, stage)
+              end
+
+              healerAlertStageByName[nameKey] = stage
             end
 
             local prev = previousPctByName[nameKey]
@@ -450,6 +724,8 @@ local function PrintHelp()
   Msg("/raidmana mode weighted | mean")
   Msg("/raidmana sort low | high")
   Msg("/raidmana offline on | off")
+  Msg("/raidmana alerts on | off")
+  Msg("/raidmana sender leader | auto")
   Msg("/raidmana autogroup on | off")
   Msg("/raidmana readability normal | readable")
   Msg("/raidmana set <name> healer|tank|dps")
@@ -497,6 +773,12 @@ local function RefreshOptionsUI()
   end
   if optionsButtons.offline then
     optionsButtons.offline:SetText("Offline: " .. (db.showOffline and "On" or "Off"))
+  end
+  if optionsButtons.alerts then
+    optionsButtons.alerts:SetText("Healer Alerts: " .. (db.healerAlerts and "On" or "Off"))
+  end
+  if optionsButtons.sender then
+    optionsButtons.sender:SetText("Alert Sender: " .. (db.alertSenderMode == "auto" and "Auto" or "Leader"))
   end
   if optionsButtons.autogroup then
     optionsButtons.autogroup:SetText("Auto Group: " .. (db.autoGroupVisibility and "On" or "Off"))
@@ -619,8 +901,17 @@ local function CreateRoleOverrideUI()
     b:SetPoint("TOP", roleFrame, "TOP", 0, -44 - ((i - 1) * 21))
     b:SetScript("OnClick", function(self)
       if not self.key then return end
+      if not CanManageOverrides() then
+        Msg("Only group leader can edit overrides.")
+        return
+      end
       local nextRole = NextRoleToken(db.roleOverrides[self.key])
       db.roleOverrides[self.key] = nextRole
+      if nextRole then
+        BroadcastOverrideSet(self.key, nextRole)
+      else
+        BroadcastOverrideDelete(self.key)
+      end
       MarkDirty()
       RefreshRoleOverrideUI()
     end)
@@ -721,6 +1012,31 @@ local function HandleSlash(msg)
     return
   end
 
+  if cmd == "alerts" then
+    if rest == "on" then
+      db.healerAlerts = true
+      Msg("Healer alerts enabled.")
+    elseif rest == "off" then
+      db.healerAlerts = false
+      Msg("Healer alerts disabled.")
+    else
+      Msg("Usage: /raidmana alerts on | off")
+    end
+    RefreshOptionsUI()
+    return
+  end
+
+  if cmd == "sender" then
+    if rest == "leader" or rest == "auto" then
+      db.alertSenderMode = rest
+      Msg("Alert sender mode set to " .. rest .. ".")
+    else
+      Msg("Usage: /raidmana sender leader | auto")
+    end
+    RefreshOptionsUI()
+    return
+  end
+
   if cmd == "autogroup" then
     if rest == "on" then
       db.autoGroupVisibility = true
@@ -770,6 +1086,10 @@ local function HandleSlash(msg)
       end
 
       if action == "set" then
+        if not CanManageOverrides() then
+          Msg("Only group leader can edit overrides.")
+          return
+        end
         if arg1 == "" or arg2 == "" then
           Msg("Usage: /raidmana set <name> healer|tank|dps")
           return
@@ -792,12 +1112,17 @@ local function HandleSlash(msg)
         end
 
         db.roleOverrides[key] = roleToken
+        BroadcastOverrideSet(key, roleToken)
         MarkDirty()
         Msg(string.format("Override set: %s -> %s", key, roleToken))
         return
       end
 
       if action == "remove" then
+        if not CanManageOverrides() then
+          Msg("Only group leader can edit overrides.")
+          return
+        end
         if arg1 == "" then
           Msg("Usage: /raidmana remove <name>")
           return
@@ -810,6 +1135,7 @@ local function HandleSlash(msg)
         end
 
         db.roleOverrides[key] = nil
+        BroadcastOverrideDelete(key)
         MarkDirty()
         Msg("Override removed: " .. key)
         return
@@ -834,7 +1160,12 @@ local function HandleSlash(msg)
       end
 
       if action == "clear" then
+        if not CanManageOverrides() then
+          Msg("Only group leader can edit overrides.")
+          return
+        end
         wipe(db.roleOverrides)
+        BroadcastOverrideClear()
         MarkDirty()
         Msg("All role overrides cleared.")
         return
@@ -860,7 +1191,7 @@ end
 
 local function CreateOptionsUI()
   optionsFrame = CreateFrame("Frame", "RaidManaTBCOptionsFrame", UIParent, BackdropTemplateMixin and "BackdropTemplate" or nil)
-  optionsFrame:SetSize(260, 300)
+  optionsFrame:SetSize(260, 352)
   optionsFrame:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
   optionsFrame:SetFrameStrata("DIALOG")
   optionsFrame:SetMovable(true)
@@ -926,20 +1257,30 @@ local function CreateOptionsUI()
     RefreshOptionsUI()
   end)
 
-  makeButton("autogroup", -138, function()
+  makeButton("alerts", -138, function()
+    db.healerAlerts = not db.healerAlerts
+    RefreshOptionsUI()
+  end)
+
+  makeButton("sender", -164, function()
+    db.alertSenderMode = (db.alertSenderMode == "leader") and "auto" or "leader"
+    RefreshOptionsUI()
+  end)
+
+  makeButton("autogroup", -190, function()
     db.autoGroupVisibility = not db.autoGroupVisibility
     ApplyAutoGroupVisibility()
     ApplyFrameSettings()
     RefreshOptionsUI()
   end)
 
-  makeButton("readability", -164, function()
+  makeButton("readability", -216, function()
     db.readability = (db.readability == "readable") and "normal" or "readable"
     MarkDirty()
     RefreshOptionsUI()
   end)
 
-  makeButton("roles", -190, function()
+  makeButton("roles", -242, function()
     if not roleFrame then
       return
     end
@@ -952,19 +1293,19 @@ local function CreateOptionsUI()
   end)
   optionsButtons.roles:SetText("Role Overrides")
 
-  makeButton("lock", -216, function()
+  makeButton("lock", -268, function()
     db.locked = not db.locked
     ApplyFrameSettings()
     RefreshOptionsUI()
   end)
 
-  makeButton("visible", -242, function()
+  makeButton("visible", -294, function()
     db.visible = not db.visible
     ApplyFrameSettings()
     RefreshOptionsUI()
   end)
 
-  makeButton("reset", -268, function()
+  makeButton("reset", -320, function()
     ResetPosition()
     RefreshOptionsUI()
   end)
@@ -1021,12 +1362,28 @@ local function CreateMainFrame()
 
   mainFrame:SetScript("OnUpdate", function(_, elapsed)
     elapsedSinceUpdate = elapsedSinceUpdate + elapsed
+    commElapsed = commElapsed + elapsed
     if elapsedSinceUpdate < UPDATE_INTERVAL then return end
     elapsedSinceUpdate = 0
 
-    if dirty and mainFrame:IsShown() then
+    if commElapsed >= COMM_INTERVAL then
+      commElapsed = 0
+      if IsInGroupNow() then
+        local selfKey = GetPlayerKey()
+        if selfKey then
+          addonPeersByName[selfKey] = GetTime and GetTime() or 0
+        end
+        SendAddonPing()
+      end
+    end
+
+    if dirty then
       dirty = false
-      Render()
+      if mainFrame:IsShown() then
+        Render()
+      else
+        BuildEntries()
+      end
     end
   end)
 end
@@ -1077,7 +1434,7 @@ local function CreateMinimapButton()
 end
 
 local eventFrame = CreateFrame("Frame")
-eventFrame:SetScript("OnEvent", function(_, event, arg1, arg2)
+eventFrame:SetScript("OnEvent", function(_, event, arg1, arg2, arg3, arg4)
   if event == "ADDON_LOADED" then
     if arg1 ~= ADDON_NAME then return end
 
@@ -1085,6 +1442,7 @@ eventFrame:SetScript("OnEvent", function(_, event, arg1, arg2)
     db = _G[DB_NAME]
     CopyDefaults(db, DEFAULTS)
     SyncMinimapSettings()
+    RegisterAddonPrefix()
 
     CreateMainFrame()
     CreateRoleOverrideUI()
@@ -1101,9 +1459,69 @@ eventFrame:SetScript("OnEvent", function(_, event, arg1, arg2)
     return
   end
 
+  if event == "CHAT_MSG_ADDON" then
+    local prefix = arg1
+    local msg = arg2
+    local senderName = arg4
+
+    if prefix ~= COMM_PREFIX then
+      return
+    end
+
+    if msg == "PING" and senderName then
+      local senderKey = NormalizeName(senderName)
+      if senderKey then
+        addonPeersByName[senderKey] = GetTime and GetTime() or 0
+        local myKey = GetPlayerKey()
+        local leaderKey = GetGroupLeaderKey()
+        if CanManageOverrides() and myKey and leaderKey and myKey == leaderKey then
+          BroadcastOverrideFullSync()
+        end
+      end
+      return
+    end
+
+    if senderName then
+      local senderKey = NormalizeName(senderName)
+      local leaderKey = GetGroupLeaderKey()
+      if not senderKey or not leaderKey or senderKey ~= leaderKey then
+        return
+      end
+
+      if string.sub(msg, 1, 9) == "OVR_FULL:" then
+        ApplySerializedOverrides(string.sub(msg, 10))
+      elseif string.sub(msg, 1, 8) == "OVR_SET:" then
+        local key, role = string.match(string.sub(msg, 9), "^([^:]+):([^:]+)$")
+        if key and IsValidRole(role) then
+          if type(db.roleOverrides) ~= "table" then db.roleOverrides = {} end
+          db.roleOverrides[key] = role
+          MarkDirty()
+        end
+      elseif string.sub(msg, 1, 8) == "OVR_DEL:" then
+        local key = string.sub(msg, 9)
+        if key and key ~= "" then
+          if type(db.roleOverrides) ~= "table" then db.roleOverrides = {} end
+          db.roleOverrides[key] = nil
+          MarkDirty()
+        end
+      elseif msg == "OVR_CLR" then
+        if type(db.roleOverrides) ~= "table" then db.roleOverrides = {} end
+        wipe(db.roleOverrides)
+        MarkDirty()
+      end
+    end
+    return
+  end
+
   if event == "PLAYER_ENTERING_WORLD" or event == "RAID_ROSTER_UPDATE" or event == "PARTY_MEMBERS_CHANGED" or event == "GROUP_ROSTER_UPDATE" then
     ApplyAutoGroupVisibility()
     ApplyFrameSettings()
+    local selfKey = GetPlayerKey()
+    if selfKey then
+      addonPeersByName[selfKey] = GetTime and GetTime() or 0
+    end
+    SendAddonPing()
+    BroadcastOverrideFullSync()
     if roleFrame and roleFrame:IsShown() then
       RefreshRoleOverrideUI()
     end
@@ -1129,3 +1547,4 @@ SafeRegister(eventFrame, "UNIT_POWER_UPDATE")
 SafeRegister(eventFrame, "UNIT_POWER")
 SafeRegister(eventFrame, "UNIT_POWER_FREQUENT")
 SafeRegister(eventFrame, "UNIT_MAXPOWER")
+SafeRegister(eventFrame, "CHAT_MSG_ADDON")
