@@ -1,5 +1,15 @@
 RaidManaTBC Changelog
 
+v1.0.8
+- Reduced chat clutter: healer alerts now trigger only below 25% and 10%.
+- Critical alert now requests Innervate explicitly.
+- Added realtime blue marker for active Innervate buff.
+- Fast-drop marker tuned to >=8% drop with ~3s display.
+v1.0.7
+- Reduced healer chat spam with threshold hysteresis and cooldown.
+- Suppressed healer alerts for dead/ghost healers.
+- Prevents repeated 50% alerts from quick regen/dip loops.
+
 v1.0.6
 - Fixed AddGroupUnits nil runtime error in override-sync logic.
 
@@ -112,6 +122,7 @@ v0.1.0
   /raidmana sort low | high
   /raidmana offline on | off
   /raidmana changelog
+
 
 
 

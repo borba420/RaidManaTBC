@@ -7,6 +7,10 @@ local ENABLE_BACKGROUND = true -- Set to false if you want no background panel.
 local COMM_PREFIX = "RMTBC1"
 local COMM_INTERVAL = 15
 local COMM_STALE = 60
+local ALERT_COOLDOWN = 45
+local DROP_MARKER_THRESHOLD = 8
+local DROP_MARKER_DURATION = 3
+local INNERVATE_SPELL_ID = 29166
 
 local HEALER_CLASSES = {
   PRIEST = true,
@@ -49,9 +53,10 @@ local DEFAULTS = {
 }
 
 local LATEST_CHANGELOG = {
-  "v1.0.6",
-  "- Fixed AddGroupUnits nil error caused by function-ordering in Lua.",
-  "- Kept leader-only override sync behavior from v1.0.5.",
+  "v1.0.8",
+  "- Reduced chat clutter: healer alerts now only at <25% and <10%.",
+  "- Added realtime blue marker for active Innervate buff.",
+  "- Fast-drop marker now uses tighter threshold and shorter duration.",
 }
 
 local db
@@ -74,8 +79,10 @@ local libDBIcon
 local previousPctByName = {}
 local recentDropUntilByName = {}
 local healerAlertStageByName = {}
+local healerAlertLastSentByKey = {}
 local addonPeersByName = {}
 local commElapsed = 0
+local INNERVATE_NAME = (GetSpellInfo and GetSpellInfo(INNERVATE_SPELL_ID)) or "Innervate"
 
 local function Msg(text)
   DEFAULT_CHAT_FRAME:AddMessage("|cff33ff99RaidManaTBC|r: " .. text)
@@ -112,6 +119,22 @@ local function ColorizePercent(pct)
     color = "ffff3333"
   end
   return string.format("|c%s%.1f%%|r", color, pct)
+end
+
+local function HasInnervate(unit)
+  if not UnitBuff then
+    return false
+  end
+  for i = 1, 40 do
+    local name = UnitBuff(unit, i)
+    if not name then
+      break
+    end
+    if name == INNERVATE_NAME then
+      return true
+    end
+  end
+  return false
 end
 
 local function SyncMinimapSettings()
@@ -519,19 +542,36 @@ local function IsAlertSender()
   return chosen == playerKey
 end
 
-local function GetHealerAlertStage(pct)
+local function GetHealerAlertStage(pct, previousStage)
   if pct < 10 then
     return 3
-  elseif pct < 25 then
+  end
+  if pct < 25 then
     return 2
-  elseif pct < 50 then
+  end
+
+  -- Hysteresis reset: don't clear stage until healer is clearly above threshold.
+  if previousStage == 3 and pct < 15 then
+    return 3
+  end
+  if previousStage and previousStage >= 2 and pct < 30 then
+    return 2
+  end
+  if previousStage and previousStage >= 1 and pct < 55 then
     return 1
   end
   return 0
 end
 
-local function SendHealerManaAlert(name, pct, stage)
+local function SendHealerManaAlert(name, nameKey, pct, stage)
   if not db.healerAlerts then
+    return
+  end
+
+  local now = GetTime and GetTime() or 0
+  local cooldownKey = (nameKey or name) .. ":" .. tostring(stage)
+  local lastSent = healerAlertLastSentByKey[cooldownKey] or 0
+  if (now - lastSent) < ALERT_COOLDOWN then
     return
   end
 
@@ -546,14 +586,13 @@ local function SendHealerManaAlert(name, pct, stage)
 
   local msg
   if stage == 3 then
-    msg = string.format("%s mana is CRITICAL (%.1f%%).", name, pct)
-  elseif stage == 2 then
-    msg = string.format("%s mana is very low (%.1f%%).", name, pct)
+    msg = string.format("%s mana CRITICAL (%.1f%%) - Innervate now.", name, pct)
   else
-    msg = string.format("%s mana is below 50%% (%.1f%%).", name, pct)
+    msg = string.format("%s mana very low (%.1f%%).", name, pct)
   end
 
   SendChatMessage(msg, channel)
+  healerAlertLastSentByKey[cooldownKey] = now
 end
 
 AddGroupUnits = function()
@@ -612,20 +651,26 @@ local function BuildEntries()
             end
 
             if connected and IsHealerUnit(unit, classFile, name) then
-              local stage = GetHealerAlertStage(pct)
               local oldStage = healerAlertStageByName[nameKey] or 0
+              local isDead = UnitIsDeadOrGhost and UnitIsDeadOrGhost(unit)
 
-              if stage > oldStage then
-                SendHealerManaAlert(name, pct, stage)
+              if isDead then
+                healerAlertStageByName[nameKey] = 0
+              else
+                local stage = GetHealerAlertStage(pct, oldStage)
+
+                if stage > oldStage then
+                  SendHealerManaAlert(name, nameKey, pct, stage)
+                end
+
+                healerAlertStageByName[nameKey] = stage
               end
-
-              healerAlertStageByName[nameKey] = stage
             end
 
             local prev = previousPctByName[nameKey]
-            if prev and (prev - pct) >= 5 then
+            if prev and (prev - pct) >= DROP_MARKER_THRESHOLD then
               local now = GetTime and GetTime() or 0
-              recentDropUntilByName[nameKey] = now + 10
+              recentDropUntilByName[nameKey] = now + DROP_MARKER_DURATION
             end
             previousPctByName[nameKey] = pct
 
@@ -639,6 +684,7 @@ local function BuildEntries()
               classFile = classFile,
               pct = pct,
               role = role,
+              innervate = HasInnervate(unit),
               index = #entries + 1,
             }
           end
@@ -685,6 +731,9 @@ local function Render()
     local e = entries[i]
     local nameColored = ColorizeName(e.name, e.classFile)
     local prefix = GetTriagePrefix(e)
+    if e.innervate then
+      prefix = prefix .. "|cff33aaff.|r "
+    end
     if db.view == "all" then
       local roleIcon = GetRoleIcon(e.role)
       if roleIcon ~= "" then
