@@ -11,6 +11,7 @@ local ALERT_COOLDOWN = 45
 local DROP_MARKER_THRESHOLD = 8
 local DROP_MARKER_DURATION = 3
 local INNERVATE_SPELL_ID = 29166
+local INNERVATE_COOLDOWN_SECONDS = 600
 
 local HEALER_CLASSES = {
   PRIEST = true,
@@ -50,9 +51,14 @@ local DEFAULTS = {
   readability = "normal", -- normal | readable
   healerAlerts = true,
   alertSenderMode = "leader", -- leader | auto
+  innervateCooldowns = {},
 }
 
 local LATEST_CHANGELOG = {
+  "v1.0.9",
+  "- Critical-only Innervate chat is now deterministic: only <10%% messages and picks a ready druid by name.",
+  "- Skips Innervate requests when no in-group druid is currently ready (respecting 10-minute cooldown tracking).",
+  "- Critical requests now include suggested caster name: '... Innervate now <Druid>'.",
   "v1.0.8",
   "- Reduced chat clutter: healer alerts now only at <25% and <10%.",
   "- Added realtime blue marker for active Innervate buff.",
@@ -80,6 +86,7 @@ local previousPctByName = {}
 local recentDropUntilByName = {}
 local healerAlertStageByName = {}
 local healerAlertLastSentByKey = {}
+local innervateStateByDruid = {}
 local addonPeersByName = {}
 local commElapsed = 0
 local INNERVATE_NAME = (GetSpellInfo and GetSpellInfo(INNERVATE_SPELL_ID)) or "Innervate"
@@ -506,6 +513,90 @@ local function IsPlayerGroupLeader()
   return false
 end
 
+local function RefreshGroupDruids()
+  wipe(innervateStateByDruid)
+  if type(db.innervateCooldowns) ~= "table" then
+    db.innervateCooldowns = {}
+  end
+
+  AddGroupUnits()
+  local now = GetTime and GetTime() or 0
+  for i = 1, #units do
+    local unit = units[i]
+    if UnitExists(unit) then
+      local _, classFile = UnitClass(unit)
+      if classFile == "DRUID" then
+        local name = UnitName(unit) or unit
+        local key = NormalizeName(name)
+        if key then
+          local readyAt = tonumber(db.innervateCooldowns[key]) or 0
+          if readyAt < now then
+            readyAt = 0
+          end
+          innervateStateByDruid[key] = {
+            name = name,
+            readyAt = readyAt,
+            key = key,
+          }
+        end
+      end
+    end
+  end
+end
+
+local function GetReadyInnervateCaster()
+  -- Always rebuild from the current group before selecting a caster
+  -- so stale names from a previous group are never reused.
+  RefreshGroupDruids()
+
+  local now = GetTime and GetTime() or 0
+
+  local ready = {}
+  for _, data in pairs(innervateStateByDruid) do
+    if data.readyAt <= now then
+      ready[#ready + 1] = data.name
+    end
+  end
+
+  if #ready == 0 then
+    return nil
+  end
+
+  table.sort(ready)
+  return ready[1]
+end
+
+local function GroupHasDruid()
+  -- Keep this in sync with current group state.
+  RefreshGroupDruids()
+  return next(innervateStateByDruid) ~= nil
+end
+
+local function RecordInnervateCast(sourceName)
+  if not sourceName then
+    return
+  end
+
+  local sourceKey = NormalizeName(sourceName)
+  if not sourceKey then
+    return
+  end
+
+  if type(db.innervateCooldowns) ~= "table" then
+    db.innervateCooldowns = {}
+  end
+  db.innervateCooldowns[sourceKey] = (GetTime and GetTime() or 0) + INNERVATE_COOLDOWN_SECONDS
+
+  if not innervateStateByDruid[sourceKey] then
+    RefreshGroupDruids()
+  end
+  if innervateStateByDruid[sourceKey] then
+    innervateStateByDruid[sourceKey].readyAt = db.innervateCooldowns[sourceKey]
+  else
+    innervateStateByDruid[sourceKey] = { key = sourceKey, name = sourceName, readyAt = db.innervateCooldowns[sourceKey] }
+  end
+end
+
 local function GetAlertChatChannel()
   return GetGroupChannel()
 end
@@ -586,13 +677,53 @@ local function SendHealerManaAlert(name, nameKey, pct, stage)
 
   local msg
   if stage == 3 then
-    msg = string.format("%s mana CRITICAL (%.1f%%) - Innervate now.", name, pct)
+    local hasDruid = GroupHasDruid()
+    if hasDruid then
+      local caster = GetReadyInnervateCaster()
+      if caster then
+        msg = string.format("%s mana CRITICAL (%.1f%%) - Innervate now %s", name, pct, caster)
+      else
+        msg = string.format("%s mana CRITICAL (%.1f%%).", name, pct)
+      end
+    else
+      msg = string.format("%s mana CRITICAL (%.1f%%).", name, pct)
+    end
+  elseif stage == 2 then
+    msg = string.format("%s mana LOW (%.1f%%).", name, pct)
   else
-    msg = string.format("%s mana very low (%.1f%%).", name, pct)
+    return
   end
 
   SendChatMessage(msg, channel)
   healerAlertLastSentByKey[cooldownKey] = now
+end
+
+local function HandleCombatLogEvent()
+  if not CombatLogGetCurrentEventInfo then
+    return
+  end
+
+  local args = { CombatLogGetCurrentEventInfo() }
+  local subEvent = args[2]
+  if subEvent ~= "SPELL_CAST_SUCCESS" and subEvent ~= "SPELL_AURA_APPLIED" and subEvent ~= "SPELL_AURA_REFRESH" then
+    return
+  end
+
+  local spellId = args[12]
+  if spellId ~= INNERVATE_SPELL_ID then
+    return
+  end
+
+  local sourceName = args[5]
+  if not sourceName then
+    return
+  end
+
+  RefreshGroupDruids()
+  local sourceKey = NormalizeName(sourceName)
+  if sourceKey and innervateStateByDruid[sourceKey] then
+    RecordInnervateCast(sourceName)
+  end
 end
 
 AddGroupUnits = function()
@@ -659,7 +790,7 @@ local function BuildEntries()
               else
                 local stage = GetHealerAlertStage(pct, oldStage)
 
-                if stage > oldStage then
+                if stage > oldStage and (stage == 2 or stage == 3) then
                   SendHealerManaAlert(name, nameKey, pct, stage)
                 end
 
@@ -1585,6 +1716,11 @@ eventFrame:SetScript("OnEvent", function(_, event, arg1, arg2, arg3, arg4)
     MarkDirty()
     return
   end
+
+  if event == "COMBAT_LOG_EVENT_UNFILTERED" then
+    HandleCombatLogEvent()
+    return
+  end
 end)
 
 eventFrame:RegisterEvent("ADDON_LOADED")
@@ -1597,3 +1733,4 @@ SafeRegister(eventFrame, "UNIT_POWER")
 SafeRegister(eventFrame, "UNIT_POWER_FREQUENT")
 SafeRegister(eventFrame, "UNIT_MAXPOWER")
 SafeRegister(eventFrame, "CHAT_MSG_ADDON")
+SafeRegister(eventFrame, "COMBAT_LOG_EVENT_UNFILTERED")

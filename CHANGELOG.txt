@@ -1,5 +1,9 @@
 RaidManaTBC Changelog
 
+v1.0.9
+- Critical-only healer chat alerts now request Innervate from a deterministic in-group druid.
+- Innervate caster suggestion includes a live druid name and obeys 10-minute cooldown.
+- If no ready druid is available, no request is posted (avoids chatter).
 v1.0.8
 - Reduced chat clutter: healer alerts now trigger only below 25% and 10%.
 - Critical alert now requests Innervate explicitly.
