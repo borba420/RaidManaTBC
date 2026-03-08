@@ -12,6 +12,14 @@ local DROP_MARKER_THRESHOLD = 8
 local DROP_MARKER_DURATION = 3
 local INNERVATE_SPELL_ID = 29166
 local INNERVATE_COOLDOWN_SECONDS = 600
+local DRUID_NONCAST_FORM_SPELL_IDS = {
+  1066, -- Aquatic Form
+  768, -- Cat Form
+  5487, -- Bear Form
+  9634, -- Dire Bear Form
+  24858, -- Moonkin Form
+  783, -- Travel Form
+}
 
 local HEALER_CLASSES = {
   PRIEST = true,
@@ -90,6 +98,13 @@ local innervateStateByDruid = {}
 local addonPeersByName = {}
 local commElapsed = 0
 local INNERVATE_NAME = (GetSpellInfo and GetSpellInfo(INNERVATE_SPELL_ID)) or "Innervate"
+local DRUID_NONCAST_FORM_NAMES = {}
+for _, spellId in ipairs(DRUID_NONCAST_FORM_SPELL_IDS) do
+  local name = GetSpellInfo and GetSpellInfo(spellId)
+  if name then
+    DRUID_NONCAST_FORM_NAMES[name] = true
+  end
+end
 
 local function Msg(text)
   DEFAULT_CHAT_FRAME:AddMessage("|cff33ff99RaidManaTBC|r: " .. text)
@@ -141,6 +156,29 @@ local function HasInnervate(unit)
       return true
     end
   end
+  return false
+end
+
+local function IsDruidInShapeshiftForm(unit)
+  if not UnitBuff or not UnitClass then
+    return false
+  end
+
+  local _, classFile = UnitClass(unit)
+  if classFile ~= "DRUID" then
+    return false
+  end
+
+  for i = 1, 40 do
+    local buffName = UnitBuff(unit, i)
+    if not buffName then
+      break
+    end
+    if DRUID_NONCAST_FORM_NAMES[buffName] then
+      return true
+    end
+  end
+
   return false
 end
 
@@ -537,6 +575,7 @@ local function RefreshGroupDruids()
             name = name,
             readyAt = readyAt,
             key = key,
+            inShapeshift = IsDruidInShapeshiftForm(unit),
           }
         end
       end
@@ -553,7 +592,7 @@ local function GetReadyInnervateCaster()
 
   local ready = {}
   for _, data in pairs(innervateStateByDruid) do
-    if data.readyAt <= now then
+    if (not data.inShapeshift) and data.readyAt <= now then
       ready[#ready + 1] = data.name
     end
   end
@@ -566,10 +605,15 @@ local function GetReadyInnervateCaster()
   return ready[1]
 end
 
-local function GroupHasDruid()
+local function GroupHasUsableDruid()
   -- Keep this in sync with current group state.
   RefreshGroupDruids()
-  return next(innervateStateByDruid) ~= nil
+  for _, data in pairs(innervateStateByDruid) do
+    if not data.inShapeshift then
+      return true
+    end
+  end
+  return false
 end
 
 local function RecordInnervateCast(sourceName)
@@ -677,7 +721,7 @@ local function SendHealerManaAlert(name, nameKey, pct, stage)
 
   local msg
   if stage == 3 then
-    local hasDruid = GroupHasDruid()
+    local hasDruid = GroupHasUsableDruid()
     if hasDruid then
       local caster = GetReadyInnervateCaster()
       if caster then
