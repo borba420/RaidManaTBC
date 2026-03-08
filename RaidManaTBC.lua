@@ -20,6 +20,11 @@ local DRUID_NONCAST_FORM_SPELL_IDS = {
   24858, -- Moonkin Form
   783, -- Travel Form
 }
+local DRUID_MANA_HIDDEN_FORM_SPELL_IDS = {
+  768, -- Cat Form
+  5487, -- Bear Form
+  9634, -- Dire Bear Form
+}
 
 local HEALER_CLASSES = {
   PRIEST = true,
@@ -60,9 +65,17 @@ local DEFAULTS = {
   healerAlerts = true,
   alertSenderMode = "leader", -- leader | auto
   innervateCooldowns = {},
+  showInnervateMarkers = true,
 }
 
 local LATEST_CHANGELOG = {
+  "v1.0.10",
+  "- Shapeshifted druids are now hidden only for mana-hiding forms; Moonkin is visible.",
+  "- Added group-aware druid filtering: caster suggestions ignore non-casting forms.",
+  "- Added compact druid-only Innervate status markers on each row (icon + state: active/ready/CD).",
+  "- Added option to toggle innervate markers in the options UI.",
+  "- Dead players now remain listed as gray \"DEAD\" entries and are pushed to the bottom.",
+  "- Prevented self-request: when a druid is at critical, it requests another eligible druid if available.",
   "v1.0.9",
   "- Critical-only Innervate chat is now deterministic: only <10%% messages and picks a ready druid by name.",
   "- Skips Innervate requests when no in-group druid is currently ready (respecting 10-minute cooldown tracking).",
@@ -98,11 +111,19 @@ local innervateStateByDruid = {}
 local addonPeersByName = {}
 local commElapsed = 0
 local INNERVATE_NAME = (GetSpellInfo and GetSpellInfo(INNERVATE_SPELL_ID)) or "Innervate"
+local INNERVATE_ICON = (GetSpellInfo and select(3, GetSpellInfo(INNERVATE_SPELL_ID))) or "Interface\\Icons\\Spell_Nature_Lightning"
 local DRUID_NONCAST_FORM_NAMES = {}
+local DRUID_MANA_HIDDEN_FORM_NAMES = {}
 for _, spellId in ipairs(DRUID_NONCAST_FORM_SPELL_IDS) do
   local name = GetSpellInfo and GetSpellInfo(spellId)
   if name then
     DRUID_NONCAST_FORM_NAMES[name] = true
+  end
+end
+for _, spellId in ipairs(DRUID_MANA_HIDDEN_FORM_SPELL_IDS) do
+  local name = GetSpellInfo and GetSpellInfo(spellId)
+  if name then
+    DRUID_MANA_HIDDEN_FORM_NAMES[name] = true
   end
 end
 
@@ -159,7 +180,7 @@ local function HasInnervate(unit)
   return false
 end
 
-local function IsDruidInShapeshiftForm(unit)
+local function IsDruidInShapeshiftForm(unit, formNames)
   if not UnitBuff or not UnitClass then
     return false
   end
@@ -169,12 +190,14 @@ local function IsDruidInShapeshiftForm(unit)
     return false
   end
 
+  local check = formNames or DRUID_NONCAST_FORM_NAMES
+
   for i = 1, 40 do
     local buffName = UnitBuff(unit, i)
     if not buffName then
       break
     end
-    if DRUID_NONCAST_FORM_NAMES[buffName] then
+    if check[buffName] then
       return true
     end
   end
@@ -521,6 +544,10 @@ local function ApplyAutoGroupVisibility()
 end
 
 local function GetTriagePrefix(entry)
+  if entry.isDead then
+    return ""
+  end
+
   local now = GetTime and GetTime() or 0
   local parts = {}
 
@@ -549,6 +576,26 @@ local function IsPlayerGroupLeader()
     return true
   end
   return false
+end
+
+local function GetInnervateStatusText(unit, name, now)
+  if not unit or not name then
+    return ""
+  end
+
+  if not HasInnervate(unit) then
+    local key = NormalizeName(name)
+    local state = key and innervateStateByDruid[key]
+    if state then
+      if state.readyAt > 0 and state.readyAt > now then
+        return string.format("|T%s:10:10:0:0:64:64|t|cffffaa00CD|r", INNERVATE_ICON)
+      end
+      return string.format("|T%s:10:10:0:0:64:64|t|cff66ff66RDY|r", INNERVATE_ICON)
+    end
+    return ""
+  end
+
+  return string.format("|T%s:12:12:0:0:64:64|t", INNERVATE_ICON)
 end
 
 local function RefreshGroupDruids()
@@ -589,10 +636,11 @@ local function GetReadyInnervateCaster()
   RefreshGroupDruids()
 
   local now = GetTime and GetTime() or 0
+  local selfKey = GetPlayerKey()
 
   local ready = {}
   for _, data in pairs(innervateStateByDruid) do
-    if (not data.inShapeshift) and data.readyAt <= now then
+    if data.key ~= selfKey and (not data.inShapeshift) and data.readyAt <= now then
       ready[#ready + 1] = data.name
     end
   end
@@ -608,8 +656,9 @@ end
 local function GroupHasUsableDruid()
   -- Keep this in sync with current group state.
   RefreshGroupDruids()
+  local selfKey = GetPlayerKey()
   for _, data in pairs(innervateStateByDruid) do
-    if not data.inShapeshift then
+    if data.key ~= selfKey and not data.inShapeshift then
       return true
     end
   end
@@ -800,8 +849,9 @@ local function BuildEntries()
   local totalMax = 0
   local totalPct = 0
   local count = 0
+  local now = GetTime and GetTime() or 0
 
-  AddGroupUnits()
+  RefreshGroupDruids()
 
   for i = 1, #units do
     local unit = units[i]
@@ -809,8 +859,11 @@ local function BuildEntries()
       local connected = UnitIsConnected(unit)
       if connected or db.showOffline then
         local _, classFile = UnitClass(unit)
-        local name = UnitName(unit) or unit
-        if db.view ~= "healers" or IsHealerUnit(unit, classFile, name) then
+        if classFile == "DRUID" and IsDruidInShapeshiftForm(unit, DRUID_MANA_HIDDEN_FORM_NAMES) then
+          -- Skip shapeshifted druids from the UI list.
+        else
+          local name = UnitName(unit) or unit
+          if db.view ~= "healers" or IsHealerUnit(unit, classFile, name) then
           local maxMana = UnitPowerMax(unit, 0) or 0
           if IsManaClass(classFile) and maxMana > 0 then
             local currentMana = connected and (UnitPower(unit, 0) or 0) or 0
@@ -818,6 +871,7 @@ local function BuildEntries()
             local role = UnitGroupRolesAssigned and UnitGroupRolesAssigned(unit) or "NONE"
             local overriddenRole = GetOverrideRoleByName(name)
             local nameKey = NormalizeName(name) or name
+            local isDead = UnitIsDeadOrGhost and UnitIsDeadOrGhost(unit)
             if overriddenRole then
               role = overriddenRole
             end
@@ -825,43 +879,46 @@ local function BuildEntries()
               role = GetFallbackRoleForClass(classFile)
             end
 
-            if connected and IsHealerUnit(unit, classFile, name) then
-              local oldStage = healerAlertStageByName[nameKey] or 0
-              local isDead = UnitIsDeadOrGhost and UnitIsDeadOrGhost(unit)
+              if connected and IsHealerUnit(unit, classFile, name) then
+                local oldStage = healerAlertStageByName[nameKey] or 0
+                local isDead = UnitIsDeadOrGhost and UnitIsDeadOrGhost(unit)
 
-              if isDead then
-                healerAlertStageByName[nameKey] = 0
-              else
-                local stage = GetHealerAlertStage(pct, oldStage)
+                if isDead then
+                  healerAlertStageByName[nameKey] = 0
+                else
+                  local stage = GetHealerAlertStage(pct, oldStage)
 
-                if stage > oldStage and (stage == 2 or stage == 3) then
-                  SendHealerManaAlert(name, nameKey, pct, stage)
+                  if stage > oldStage and (stage == 2 or stage == 3) then
+                    SendHealerManaAlert(name, nameKey, pct, stage)
+                  end
+
+                  healerAlertStageByName[nameKey] = stage
                 end
-
-                healerAlertStageByName[nameKey] = stage
               end
+
+              local prev = previousPctByName[nameKey]
+              if prev and (prev - pct) >= DROP_MARKER_THRESHOLD then
+                local now = GetTime and GetTime() or 0
+                recentDropUntilByName[nameKey] = now + DROP_MARKER_DURATION
+              end
+              previousPctByName[nameKey] = pct
+
+              count = count + 1
+              totalCurrent = totalCurrent + currentMana
+              totalMax = totalMax + maxMana
+              totalPct = totalPct + pct
+
+              entries[#entries + 1] = {
+                name = name,
+                classFile = classFile,
+                pct = pct,
+                role = role,
+                innervate = HasInnervate(unit),
+                innervateStatus = classFile == "DRUID" and GetInnervateStatusText(unit, name, now) or "",
+                isDead = isDead,
+                index = #entries + 1,
+              }
             end
-
-            local prev = previousPctByName[nameKey]
-            if prev and (prev - pct) >= DROP_MARKER_THRESHOLD then
-              local now = GetTime and GetTime() or 0
-              recentDropUntilByName[nameKey] = now + DROP_MARKER_DURATION
-            end
-            previousPctByName[nameKey] = pct
-
-            count = count + 1
-            totalCurrent = totalCurrent + currentMana
-            totalMax = totalMax + maxMana
-            totalPct = totalPct + pct
-
-            entries[#entries + 1] = {
-              name = name,
-              classFile = classFile,
-              pct = pct,
-              role = role,
-              innervate = HasInnervate(unit),
-              index = #entries + 1,
-            }
           end
         end
       end
@@ -869,6 +926,9 @@ local function BuildEntries()
   end
 
   table.sort(entries, function(a, b)
+    if a.isDead ~= b.isDead then
+      return not a.isDead
+    end
     if a.pct == b.pct then
       if a.name == b.name then
         return a.index < b.index
@@ -905,20 +965,39 @@ local function Render()
   for i = 1, shown do
     local e = entries[i]
     local nameColored = ColorizeName(e.name, e.classFile)
-    local prefix = GetTriagePrefix(e)
-    if e.innervate then
-      prefix = prefix .. "|cff33aaff.|r "
+    if e.isDead then
+      nameColored = "|cff999999" .. e.name .. "|r"
     end
+    local prefix = GetTriagePrefix(e)
+    local markerSuffix = ""
     if db.view == "all" then
       local roleIcon = GetRoleIcon(e.role)
       if roleIcon ~= "" then
         prefix = prefix .. roleIcon .. " "
       end
     end
+
+    if db.showInnervateMarkers then
+      if e.innervate then
+        markerSuffix = markerSuffix .. string.format("|T%s:14:14:0:0:64:64|t ", INNERVATE_ICON)
+      end
+      if e.classFile == "DRUID" and e.innervateStatus ~= "" then
+        markerSuffix = markerSuffix .. e.innervateStatus .. " "
+      end
+    end
+
+    if markerSuffix ~= "" then
+      markerSuffix = " " .. markerSuffix
+    end
+
     local pctColored = ColorizePercent(e.pct)
+    if e.isDead then
+      pctColored = "|cff777777DEAD|r"
+      markerSuffix = ""
+    end
     linePool[i]:SetFontObject(fontObject)
     linePool[i]:SetPoint("TOPLEFT", mainFrame, "TOPLEFT", 6, -6 - (i * lineSpacing))
-    linePool[i]:SetText(string.format("%s%s: %s", prefix, nameColored, pctColored))
+    linePool[i]:SetText(string.format("%s%s%s: %s", prefix, nameColored, markerSuffix, pctColored))
     linePool[i]:Show()
   end
 
@@ -949,6 +1028,7 @@ local function PrintHelp()
   Msg("/raidmana sort low | high")
   Msg("/raidmana offline on | off")
   Msg("/raidmana alerts on | off")
+  Msg("/raidmana innervate on | off")
   Msg("/raidmana sender leader | auto")
   Msg("/raidmana autogroup on | off")
   Msg("/raidmana readability normal | readable")
@@ -1000,6 +1080,9 @@ local function RefreshOptionsUI()
   end
   if optionsButtons.alerts then
     optionsButtons.alerts:SetText("Healer Alerts: " .. (db.healerAlerts and "On" or "Off"))
+  end
+  if optionsButtons.innervateMarkers then
+    optionsButtons.innervateMarkers:SetText("Innervate Markers: " .. (db.showInnervateMarkers and "On" or "Off"))
   end
   if optionsButtons.sender then
     optionsButtons.sender:SetText("Alert Sender: " .. (db.alertSenderMode == "auto" and "Auto" or "Leader"))
@@ -1250,6 +1333,22 @@ local function HandleSlash(msg)
     return
   end
 
+  if cmd == "innervate" then
+    if rest == "on" then
+      db.showInnervateMarkers = true
+      MarkDirty()
+      Msg("Innervate markers enabled.")
+    elseif rest == "off" then
+      db.showInnervateMarkers = false
+      MarkDirty()
+      Msg("Innervate markers disabled.")
+    else
+      Msg("Usage: /raidmana innervate on | off")
+    end
+    RefreshOptionsUI()
+    return
+  end
+
   if cmd == "sender" then
     if rest == "leader" or rest == "auto" then
       db.alertSenderMode = rest
@@ -1415,7 +1514,7 @@ end
 
 local function CreateOptionsUI()
   optionsFrame = CreateFrame("Frame", "RaidManaTBCOptionsFrame", UIParent, BackdropTemplateMixin and "BackdropTemplate" or nil)
-  optionsFrame:SetSize(260, 352)
+  optionsFrame:SetSize(260, 378)
   optionsFrame:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
   optionsFrame:SetFrameStrata("DIALOG")
   optionsFrame:SetMovable(true)
@@ -1486,25 +1585,31 @@ local function CreateOptionsUI()
     RefreshOptionsUI()
   end)
 
-  makeButton("sender", -164, function()
+  makeButton("innervateMarkers", -164, function()
+    db.showInnervateMarkers = not db.showInnervateMarkers
+    MarkDirty()
+    RefreshOptionsUI()
+  end)
+
+  makeButton("sender", -190, function()
     db.alertSenderMode = (db.alertSenderMode == "leader") and "auto" or "leader"
     RefreshOptionsUI()
   end)
 
-  makeButton("autogroup", -190, function()
+  makeButton("autogroup", -216, function()
     db.autoGroupVisibility = not db.autoGroupVisibility
     ApplyAutoGroupVisibility()
     ApplyFrameSettings()
     RefreshOptionsUI()
   end)
 
-  makeButton("readability", -216, function()
+  makeButton("readability", -242, function()
     db.readability = (db.readability == "readable") and "normal" or "readable"
     MarkDirty()
     RefreshOptionsUI()
   end)
 
-  makeButton("roles", -242, function()
+  makeButton("roles", -268, function()
     if not roleFrame then
       return
     end
@@ -1517,19 +1622,19 @@ local function CreateOptionsUI()
   end)
   optionsButtons.roles:SetText("Role Overrides")
 
-  makeButton("lock", -268, function()
+  makeButton("lock", -294, function()
     db.locked = not db.locked
     ApplyFrameSettings()
     RefreshOptionsUI()
   end)
 
-  makeButton("visible", -294, function()
+  makeButton("visible", -320, function()
     db.visible = not db.visible
     ApplyFrameSettings()
     RefreshOptionsUI()
   end)
 
-  makeButton("reset", -320, function()
+  makeButton("reset", -346, function()
     ResetPosition()
     RefreshOptionsUI()
   end)

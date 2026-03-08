@@ -1,5 +1,14 @@
 RaidManaTBC Changelog
 
+v1.0.10
+- Added compact druid-only Innervate status markers in the mana list (icon + active/ready/CD).
+- Added group-aware druid filtering for innervate suggestions (ignores non-casting forms).
+- Shapeshifted druids are hidden from the UI list only for mana-hiding forms; Moonkin is visible.
+- Moonkin is now excluded from innervate caster candidates.
+- Prevented self-requests: a druid at critical now requests another eligible druid when possible.
+- Added toggle in settings to show/hide Innervate markers and enlarged active marker icon.
+- Dead players now remain listed as gray "DEAD" entries and sort to the bottom of the list.
+
 v1.0.9
 - Critical-only healer chat alerts now request Innervate from a deterministic in-group druid.
 - Innervate caster suggestion includes a live druid name and obeys 10-minute cooldown.
