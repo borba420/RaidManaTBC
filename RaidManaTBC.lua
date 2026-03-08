@@ -69,6 +69,9 @@ local DEFAULTS = {
 }
 
 local LATEST_CHANGELOG = {
+  "v1.0.11",
+  "- Fixed innervate caster selection so dead/disconnected druids are never used or suggested.",
+  "- Improved deterministic innervate candidate rules: self is excluded, shapeshifted druids ignored, readiness required.",
   "v1.0.10",
   "- Shapeshifted druids are now hidden only for mana-hiding forms; Moonkin is visible.",
   "- Added group-aware druid filtering: caster suggestions ignore non-casting forms.",
@@ -622,12 +625,23 @@ local function RefreshGroupDruids()
             name = name,
             readyAt = readyAt,
             key = key,
+            isDead = UnitIsDeadOrGhost and UnitIsDeadOrGhost(unit),
+            connected = UnitIsConnected and UnitIsConnected(unit),
             inShapeshift = IsDruidInShapeshiftForm(unit),
           }
         end
       end
     end
   end
+end
+
+local function IsUsableInnervateCaster(data, selfKey, now)
+  return data ~= nil
+    and data.key ~= selfKey
+    and (not data.inShapeshift)
+    and (not data.isDead)
+    and data.connected ~= false
+    and data.readyAt <= now
 end
 
 local function GetReadyInnervateCaster()
@@ -640,7 +654,7 @@ local function GetReadyInnervateCaster()
 
   local ready = {}
   for _, data in pairs(innervateStateByDruid) do
-    if data.key ~= selfKey and (not data.inShapeshift) and data.readyAt <= now then
+    if IsUsableInnervateCaster(data, selfKey, now) then
       ready[#ready + 1] = data.name
     end
   end
@@ -658,7 +672,7 @@ local function GroupHasUsableDruid()
   RefreshGroupDruids()
   local selfKey = GetPlayerKey()
   for _, data in pairs(innervateStateByDruid) do
-    if data.key ~= selfKey and not data.inShapeshift then
+    if IsUsableInnervateCaster(data, selfKey, GetTime and GetTime() or 0) then
       return true
     end
   end

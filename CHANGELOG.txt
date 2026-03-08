@@ -1,5 +1,9 @@
 RaidManaTBC Changelog
 
+v1.0.11
+- Fixed innervate caster selection so dead/disconnected druids are never used or suggested.
+- Improved deterministic casters: self is always excluded, shapeshifted druids are ignored, and readiness is required.
+
 v1.0.10
 - Added compact druid-only Innervate status markers in the mana list (icon + active/ready/CD).
 - Added group-aware druid filtering for innervate suggestions (ignores non-casting forms).
