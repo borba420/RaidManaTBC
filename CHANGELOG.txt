@@ -1,5 +1,8 @@
 RaidManaTBC Changelog
 
+v1.0.12
+- Stability and bugfixes.
+
 v1.0.11
 - Fixed innervate caster selection so dead/disconnected druids are never used or suggested.
 - Improved deterministic casters: self is always excluded, shapeshifted druids are ignored, and readiness is required.

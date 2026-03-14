@@ -1,8 +1,8 @@
 ## Interface: 20504
 ## Title: RaidManaTBC
 ## Notes: Lightweight raid/party mana overview for TBC Classic
-## Author: YourName
-## Version: 1.0.11
+## Author: VirusLike1
+## Version: 1.0.12
 ## X-Curse-Project-ID: 1476373
 ## OptionalDeps: LibStub, CallbackHandler-1.0, LibDataBroker-1.1, LibDBIcon-1.0
 ## SavedVariables: RaidManaTBCDB

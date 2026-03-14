@@ -69,6 +69,8 @@ local DEFAULTS = {
 }
 
 local LATEST_CHANGELOG = {
+  "v1.0.12",
+  "- Stability and bugfixes.",
   "v1.0.11",
   "- Fixed innervate caster selection so dead/disconnected druids are never used or suggested.",
   "- Improved deterministic innervate candidate rules: self is excluded, shapeshifted druids ignored, readiness required.",
@@ -586,19 +588,19 @@ local function GetInnervateStatusText(unit, name, now)
     return ""
   end
 
-  if not HasInnervate(unit) then
-    local key = NormalizeName(name)
-    local state = key and innervateStateByDruid[key]
-    if state then
-      if state.readyAt > 0 and state.readyAt > now then
-        return string.format("|T%s:10:10:0:0:64:64|t|cffffaa00CD|r", INNERVATE_ICON)
-      end
-      return string.format("|T%s:10:10:0:0:64:64|t|cff66ff66RDY|r", INNERVATE_ICON)
-    end
-    return ""
+  if HasInnervate(unit) then
+    return string.format("|T%s:14:14:0:0:64:64|t", INNERVATE_ICON)
   end
 
-  return string.format("|T%s:12:12:0:0:64:64|t", INNERVATE_ICON)
+  local key = NormalizeName(name)
+  local state = key and innervateStateByDruid[key]
+  if state then
+    if state.readyAt > 0 and state.readyAt > now then
+      return string.format("|T%s:10:10:0:0:64:64|t|cffffaa00CD|r", INNERVATE_ICON)
+    end
+    return string.format("|T%s:10:10:0:0:64:64|t|cff66ff66RDY|r", INNERVATE_ICON)
+  end
+  return ""
 end
 
 local function RefreshGroupDruids()
@@ -635,26 +637,26 @@ local function RefreshGroupDruids()
   end
 end
 
-local function IsUsableInnervateCaster(data, selfKey, now)
+local function IsUsableInnervateCaster(data, excludedKey, now)
   return data ~= nil
-    and data.key ~= selfKey
+    and data.key ~= excludedKey
     and (not data.inShapeshift)
     and (not data.isDead)
     and data.connected ~= false
     and data.readyAt <= now
 end
 
-local function GetReadyInnervateCaster()
+local function GetReadyInnervateCaster(excludedKey)
   -- Always rebuild from the current group before selecting a caster
   -- so stale names from a previous group are never reused.
   RefreshGroupDruids()
 
   local now = GetTime and GetTime() or 0
-  local selfKey = GetPlayerKey()
+  local casterExcludedKey = excludedKey or GetPlayerKey()
 
   local ready = {}
   for _, data in pairs(innervateStateByDruid) do
-    if IsUsableInnervateCaster(data, selfKey, now) then
+    if IsUsableInnervateCaster(data, casterExcludedKey, now) then
       ready[#ready + 1] = data.name
     end
   end
@@ -667,12 +669,12 @@ local function GetReadyInnervateCaster()
   return ready[1]
 end
 
-local function GroupHasUsableDruid()
+local function GroupHasUsableDruid(excludedKey)
   -- Keep this in sync with current group state.
   RefreshGroupDruids()
-  local selfKey = GetPlayerKey()
+  local casterExcludedKey = excludedKey or GetPlayerKey()
   for _, data in pairs(innervateStateByDruid) do
-    if IsUsableInnervateCaster(data, selfKey, GetTime and GetTime() or 0) then
+    if IsUsableInnervateCaster(data, casterExcludedKey, GetTime and GetTime() or 0) then
       return true
     end
   end
@@ -784,9 +786,9 @@ local function SendHealerManaAlert(name, nameKey, pct, stage)
 
   local msg
   if stage == 3 then
-    local hasDruid = GroupHasUsableDruid()
+    local hasDruid = GroupHasUsableDruid(nameKey)
     if hasDruid then
-      local caster = GetReadyInnervateCaster()
+      local caster = GetReadyInnervateCaster(nameKey)
       if caster then
         msg = string.format("%s mana CRITICAL (%.1f%%) - Innervate now %s", name, pct, caster)
       else
@@ -886,6 +888,7 @@ local function BuildEntries()
             local overriddenRole = GetOverrideRoleByName(name)
             local nameKey = NormalizeName(name) or name
             local isDead = UnitIsDeadOrGhost and UnitIsDeadOrGhost(unit)
+            local manaHiddenForm = classFile == "DRUID" and IsDruidInShapeshiftForm(unit, DRUID_MANA_HIDDEN_FORM_NAMES)
             if overriddenRole then
               role = overriddenRole
             end
@@ -893,7 +896,7 @@ local function BuildEntries()
               role = GetFallbackRoleForClass(classFile)
             end
 
-              if connected and IsHealerUnit(unit, classFile, name) then
+              if connected and (not manaHiddenForm) and IsHealerUnit(unit, classFile, name) then
                 local oldStage = healerAlertStageByName[nameKey] or 0
                 local isDead = UnitIsDeadOrGhost and UnitIsDeadOrGhost(unit)
 
@@ -992,9 +995,6 @@ local function Render()
     end
 
     if db.showInnervateMarkers then
-      if e.innervate then
-        markerSuffix = markerSuffix .. string.format("|T%s:14:14:0:0:64:64|t ", INNERVATE_ICON)
-      end
       if e.classFile == "DRUID" and e.innervateStatus ~= "" then
         markerSuffix = markerSuffix .. e.innervateStatus .. " "
       end
